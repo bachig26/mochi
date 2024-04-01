@@ -46,16 +46,38 @@ struct GeneralView: View {
   @Environment(\.theme) var theme
 
   var body: some View {
-    EmptyView()
-//        SettingsGroup(title: showTitle ? SettingsFeature.Section.general.localized : "") {
-//            // TODO: Actually allow users to set which discover page to show on startup
-//            SettingRow(title: "Discover Page", accessory: {
-//                Toggle("", isOn: .constant(true))
-//                    .labelsHidden()
-//                    .toggleStyle(.switch)
-//                    .controlSize(.small)
-//            })
-//        }
+    WithViewStore(store, observe: \.`self`) { viewStore in
+      SettingsGroup(title: showTitle ? SettingsFeature.Section.general.localized : "") {
+        SettingRow(title: "Fast Forward skip amount", accessory: {
+          HStack {
+            TextField("", value: viewStore.$userSettings.fastForwardAmount, format: .number)
+            Text("s").foregroundStyle(.secondary)
+          }
+          .frame(maxWidth: 50)
+          .padding(8)
+          .background(Color.secondarySystemBackground)
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .stroke(.quaternary, lineWidth: 0.5)
+          )
+        })
+        SettingRow(title: "Fast Backward skip amount", accessory: {
+          HStack {
+            TextField("", value: viewStore.$userSettings.fastBackwardAmount, format: .number)
+            Text("s").foregroundStyle(.secondary)
+          }
+          .frame(maxWidth: 50)
+          .padding(8)
+          .background(Color.secondarySystemBackground)
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .stroke(.quaternary, lineWidth: 0.5)
+          )
+        })
+      }
+    }
   }
 }
 
@@ -184,6 +206,42 @@ struct ThemePicker: View {
           }
           .buttonStyle(.scaled)
         }
+      }
+    }
+  }
+}
+
+// MARK: - HistoryView
+
+@MainActor
+struct HistoryView: View {
+  var showTitle = true
+  let store: StoreOf<SettingsFeature>
+
+  @SwiftUI.State private var confirmRemoval: Bool = false
+
+  @Environment(\.theme) var theme
+
+  var body: some View {
+    WithViewStore(store, observe: \.`self`) { viewStore in
+      SettingsGroup(title: showTitle ? SettingsFeature.Section.history.localized : "") {
+        Button {
+          confirmRemoval.toggle()
+        } label: {
+          Text("Clear Watch History").foregroundColor(.red)
+            .frame(maxWidth: .infinity)
+        }
+        .confirmationDialog(
+          "Are you sure?",
+          isPresented: $confirmRemoval
+        ) {
+          Button("Remove all watch history", role: .destructive) {
+            viewStore.send(.view(.clearHistory))
+          }
+        } message: {
+          Text("You cannot undo this action")
+        }
+        .padding()
       }
     }
   }

@@ -12,6 +12,7 @@ import ContentCore
 import LoggerClient
 import ModuleClient
 import PlayerClient
+import PlaylistHistoryClient
 import SharedModels
 
 // MARK: - Cancellables
@@ -33,11 +34,18 @@ extension VideoPlayerFeature: Reducer {
     Reduce { state, action in
       switch action {
       case .view(.didAppear):
+        @Dependency(\.playlistHistoryClient) var playlistHistoryClient
+
+        let groupId = state.selected.groupId.rawValue
+        let repoModule = state.content.repoModuleId
         return .merge(
           state.content.fetchContent(.page(state.selected.groupId, state.selected.variantId, state.selected.pageId))
             .map { .internal(.content($0)) },
           .run { send in
             for await status in playerClient.observe() {
+              if let progress = status.playback?.progress {
+                try? await playlistHistoryClient.updateTimestamp(.init(repoId: repoModule.repoId.absoluteString, moduleId: repoModule.moduleId.rawValue, playlistId: groupId), progress)
+              }
               await send(.internal(.playerStatusUpdate(status)))
             }
           }
@@ -108,10 +116,9 @@ extension VideoPlayerFeature: Reducer {
         }
 
       case .view(.didSkipForward):
-        let skipTime = state.playerSettings.skipTime // In seconds
         let currentProgress = state.player.playback?.progress ?? .zero
         let totalDuration = state.player.playback?.totalDuration ?? 1
-        let newProgress = min(1.0, max(0, currentProgress + (skipTime / totalDuration)))
+        let newProgress = min(1.0, max(0, currentProgress + (state.playerSettings.skipForwardTime / totalDuration)))
         return .merge(
           state.delayDismissOverlayIfNeeded(),
           .run { _ in
@@ -120,10 +127,9 @@ extension VideoPlayerFeature: Reducer {
         )
 
       case .view(.didSkipBackwards):
-        let skipTime = state.playerSettings.skipTime // In seconds
         let currentProgress = state.player.playback?.progress ?? .zero
         let totalDuration = state.player.playback?.totalDuration ?? 1
-        let newProgress = min(1.0, max(0, currentProgress - (skipTime / totalDuration)))
+        let newProgress = min(1.0, max(0, currentProgress - (state.playerSettings.skipBackwardTime / totalDuration)))
         return .merge(
           state.delayDismissOverlayIfNeeded(),
           .run { _ in
@@ -139,7 +145,7 @@ extension VideoPlayerFeature: Reducer {
       case .internal(.hideToolsOverlay):
         state.overlay = state.overlay == .tools ? nil : state.overlay
 
-      case let .internal(.content(.didTapPlaylistItem(group, variant, page, itemId))):
+      case let .internal(.content(.didTapPlaylistItem(group, variant, page, itemId, _))):
         state.overlay = .tools
         return state.clearForNewEpisodeIfNeeded(group, variant, page, itemId)
 
@@ -284,7 +290,9 @@ extension VideoPlayerFeature.State {
     _ episodeId: Playlist.Item.ID
   ) -> Effect<VideoPlayerFeature.Action> {
     @Dependency(\.playerClient) var playerClient
+    @Dependency(\.playlistHistoryClient) var playlistHistoryClient
 
+    let repoModule = content.repoModuleId
     if selected.groupId != groupId ||
       selected.variantId != variantId ||
       selected.pageId != pageId ||
@@ -300,7 +308,10 @@ extension VideoPlayerFeature.State {
       loadables.playlistItemSourcesLoadables.removeAll()
       return .merge(
         fetchSourcesIfNecessary(),
-        .run { await playerClient.clear() }
+        .run { _ in
+          await playerClient.clear()
+          try? await playlistHistoryClient.updateTimestamp(.init(repoId: repoModule.repoId.absoluteString, moduleId: repoModule.moduleId.rawValue, playlistId: groupId.rawValue), 0)
+        }
       )
     }
     return .none
@@ -351,6 +362,7 @@ extension VideoPlayerFeature.State {
 
   public mutating func clearForChangedLinkIfNeeded(_ linkId: Playlist.EpisodeServer.Link.ID) -> Effect<VideoPlayerFeature.Action> {
     @Dependency(\.playerClient) var playerClient
+    @Dependency(\.playlistHistoryClient) var playlistHistoryClient
 
     if selected.linkId != linkId {
       selected.linkId = linkId
@@ -359,28 +371,32 @@ extension VideoPlayerFeature.State {
          let link = server.links[id: linkId] {
         let playlist = playlist
         let episode = selectedItem.value.flatMap { $0 }
-        let loadItem = PlayerClient.VideoCompositionItem(
-          link: link.url,
-          headers: server.headers,
-          subtitles: server.subtitles.map { subtitle in
-            .init(
-              name: subtitle.name,
-              default: subtitle.default,
-              autoselect: subtitle.autoselect,
-              forced: false,
-              link: subtitle.url
-            )
-          },
-          metadata: .init(
-            title: episode.flatMap { $0.title ?? "Episode \($0.number.withoutTrailingZeroes)" },
-            artworkImage: episode?.thumbnail ?? playlist.posterImage,
-            author: playlist.title
-          ),
-          format: link.format == .hls ? .hls : .dash
-        )
+        let groupId = selected.groupId.rawValue
+        let repoModule = content.repoModuleId
 
         return .run { _ in
           await playerClient.clear()
+          let playlistHistory = try? await playlistHistoryClient.fetch(.init(repoId: repoModule.repoId.absoluteString, moduleId: repoModule.moduleId.rawValue, playlistId: groupId))
+          let loadItem = PlayerClient.VideoCompositionItem(
+            link: link.url,
+            headers: server.headers,
+            subtitles: server.subtitles.map { subtitle in
+              .init(
+                name: subtitle.name,
+                default: subtitle.default,
+                autoselect: subtitle.autoselect,
+                forced: false,
+                link: subtitle.url
+              )
+            },
+            metadata: .init(
+              title: episode.flatMap { $0.title ?? "Episode \($0.number.withoutTrailingZeroes)" },
+              artworkImage: episode?.thumbnail ?? playlist.posterImage,
+              author: playlist.title
+            ),
+            format: link.format == .hls ? .hls : .dash,
+            progress: playlistHistory?.timestamp ?? nil
+          )
           try await playerClient.load(loadItem)
           await playerClient.play()
         }
@@ -432,8 +448,12 @@ extension VideoPlayerFeature.State {
     let sourceId = selected.sourceId
     let serverId = selected.serverId
 
-    guard let sourceId else { return .none }
-    guard let serverId else { return .none }
+    guard let sourceId else {
+      return .none
+    }
+    guard let serverId else {
+      return .none
+    }
 
     if forced || !loadables[serverId: serverId].hasInitialized {
       loadables.update(with: serverId, response: .loading)
